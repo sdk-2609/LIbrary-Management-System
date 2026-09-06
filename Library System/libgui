@@ -1,0 +1,1062 @@
+"""
+Library Management System - Minimal GUI version
+--------------------------------------------------
+A simple, button-based (no numbered menu) desktop GUI for the Library
+Management System, built with Python's built-in Tkinter library and an
+SQLite database (via Python's built-in sqlite3 module).
+
+Dates are never typed manually - every date field is a small popup
+calendar you click to pick a day (built from scratch with Tkinter +
+Python's standard `calendar` module, no extra libraries required).
+
+Run:
+    python library_gui.py
+
+Database file "library.db" is created automatically in the same folder.
+
+Note (Linux only): if you see "No module named 'tkinter'", install it with:
+    sudo apt-get install python3-tk
+Tkinter ships built-in with the standard Python installers on Windows/Mac.
+"""
+
+import calendar
+import sqlite3
+import tkinter as tk
+from tkinter import ttk, messagebox
+from datetime import date
+
+DB_NAME = "library.db"
+
+
+# ---------------------------------------------------------------------------
+# Database layer (same schema/logic as the CLI version)
+# ---------------------------------------------------------------------------
+
+def get_connection():
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def initialize_database():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS books (
+            book_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            author TEXT NOT NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS borrow_records (
+            record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id INTEGER NOT NULL,
+            student_name TEXT NOT NULL,
+            student_class TEXT NOT NULL,
+            borrow_date TEXT NOT NULL,
+            return_date TEXT,
+            FOREIGN KEY (book_id) REFERENCES books (book_id)
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def add_book_db(name, author):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO books (name, author) VALUES (?, ?)", (name, author))
+    conn.commit()
+    conn.close()
+
+
+def get_all_books_db():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT book_id, name, author FROM books ORDER BY name")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def find_books_by_name_db(name):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT book_id, name, author FROM books WHERE name LIKE ? ORDER BY name",
+        (f"%{name}%",)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def get_open_records_for_book_db(book_id):
+    """Records for this book that have not been returned yet."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT record_id, student_name, student_class, borrow_date
+        FROM borrow_records
+        WHERE book_id = ? AND return_date IS NULL
+        ORDER BY borrow_date
+    """, (book_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def borrow_book_db(book_id, student_name, student_class, borrow_date):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO borrow_records
+            (book_id, student_name, student_class, borrow_date, return_date)
+        VALUES (?, ?, ?, ?, NULL)
+    """, (book_id, student_name, student_class, borrow_date))
+    conn.commit()
+    conn.close()
+
+
+def return_book_db(record_id, return_date):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE borrow_records SET return_date = ? WHERE record_id = ?",
+        (return_date, record_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_history_for_book_db(book_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT record_id, student_name, student_class, borrow_date, return_date
+        FROM borrow_records
+        WHERE book_id = ?
+        ORDER BY borrow_date
+    """, (book_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def search_by_student_db(name):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT r.record_id, b.name, b.author, r.student_name, r.student_class,
+               r.borrow_date, r.return_date
+        FROM borrow_records r
+        JOIN books b ON b.book_id = r.book_id
+        WHERE r.student_name LIKE ?
+        ORDER BY r.borrow_date
+    """, (f"%{name}%",))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def get_full_history_db():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT r.record_id, b.name, b.author, r.student_name, r.student_class,
+               r.borrow_date, r.return_date
+        FROM borrow_records r
+        JOIN books b ON b.book_id = r.book_id
+        ORDER BY r.borrow_date
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def get_borrow_record_by_id_db(record_id):
+    """Full details for one borrow record, joined with its book. None if not found."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT r.record_id, r.book_id, b.name, b.author,
+               r.student_name, r.student_class, r.borrow_date, r.return_date
+        FROM borrow_records r
+        JOIN books b ON b.book_id = r.book_id
+        WHERE r.record_id = ?
+    """, (record_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+
+def update_borrow_record_db(record_id, student_name, student_class, borrow_date, return_date):
+    """return_date may be None to mark the book as not yet returned."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE borrow_records
+        SET student_name = ?, student_class = ?, borrow_date = ?, return_date = ?
+        WHERE record_id = ?
+    """, (student_name, student_class, borrow_date, return_date, record_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_borrow_record_db(record_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM borrow_records WHERE record_id = ?", (record_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_book_by_id_db(book_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT book_id, name, author FROM books WHERE book_id = ?", (book_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+
+def update_book_db(book_id, name, author):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE books SET name = ?, author = ? WHERE book_id = ?",
+        (name, author, book_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_borrow_count_for_book_db(book_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM borrow_records WHERE book_id = ?", (book_id,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+
+def delete_book_db(book_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM books WHERE book_id = ?", (book_id,))
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Popup calendar widget (no external libraries needed)
+# ---------------------------------------------------------------------------
+
+class CalendarPopup(tk.Toplevel):
+    """A small popup window showing one month at a time; click a day to pick it."""
+
+    def __init__(self, parent, on_select, initial_date=None):
+        super().__init__(parent)
+        self.on_select = on_select
+        self.title("Select date")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        start = initial_date or date.today()
+        self.year = start.year
+        self.month = start.month
+
+        header = ttk.Frame(self, padding=6)
+        header.pack(fill="x")
+
+        ttk.Button(header, text="<", width=3, command=self.prev_month).pack(side="left")
+        self.label_var = tk.StringVar()
+        ttk.Label(header, textvariable=self.label_var, width=16,
+                  anchor="center", font=("TkDefaultFont", 10, "bold")).pack(side="left", expand=True)
+        ttk.Button(header, text=">", width=3, command=self.next_month).pack(side="left")
+
+        self.days_frame = ttk.Frame(self, padding=(6, 0, 6, 6))
+        self.days_frame.pack()
+
+        self.draw_calendar()
+
+    def draw_calendar(self):
+        for widget in self.days_frame.winfo_children():
+            widget.destroy()
+
+        self.label_var.set(f"{calendar.month_name[self.month]} {self.year}")
+
+        weekday_names = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
+        for col, wd in enumerate(weekday_names):
+            ttk.Label(self.days_frame, text=wd, width=4, anchor="center").grid(
+                row=0, column=col, padx=1, pady=1
+            )
+
+        weeks = calendar.monthcalendar(self.year, self.month)
+        today = date.today()
+        for row, week in enumerate(weeks, start=1):
+            for col, day in enumerate(week):
+                if day == 0:
+                    ttk.Label(self.days_frame, text="", width=4).grid(
+                        row=row, column=col, padx=1, pady=1
+                    )
+                    continue
+                is_today = (day == today.day and self.month == today.month
+                            and self.year == today.year)
+                btn = tk.Button(
+                    self.days_frame, text=str(day), width=3,
+                    relief="solid" if is_today else "flat",
+                    command=lambda d=day: self.select_day(d)
+                )
+                btn.grid(row=row, column=col, padx=1, pady=1)
+
+    def prev_month(self):
+        self.month -= 1
+        if self.month == 0:
+            self.month = 12
+            self.year -= 1
+        self.draw_calendar()
+
+    def next_month(self):
+        self.month += 1
+        if self.month == 13:
+            self.month = 1
+            self.year += 1
+        self.draw_calendar()
+
+    def select_day(self, day):
+        chosen = date(self.year, self.month, day)
+        self.on_select(chosen.isoformat())
+        self.destroy()
+
+
+class DateEntry(ttk.Frame):
+    """A read-only date field + a small button that opens the popup calendar."""
+
+    def __init__(self, parent, initial=None):
+        super().__init__(parent)
+        self.var = tk.StringVar(value=initial or date.today().isoformat())
+        self.entry = ttk.Entry(self, textvariable=self.var, width=12, state="readonly")
+        self.entry.pack(side="left")
+        self.btn = ttk.Button(self, text="📅", width=3, command=self.open_calendar)
+        self.btn.pack(side="left", padx=(4, 0))
+
+    def open_calendar(self):
+        try:
+            current = date.fromisoformat(self.var.get())
+        except ValueError:
+            current = date.today()
+        CalendarPopup(self, self.set_date, initial_date=current)
+
+    def set_date(self, date_str):
+        self.var.set(date_str)
+
+    def get(self):
+        return self.var.get()
+
+
+# ---------------------------------------------------------------------------
+# Helper: right-click binding that works across Windows/Linux/Mac
+# ---------------------------------------------------------------------------
+
+def bind_right_click(widget, handler):
+    widget.bind("<Button-3>", handler)       # Windows / Linux
+    widget.bind("<Button-2>", handler)       # macOS (two-finger / secondary click)
+    widget.bind("<Control-Button-1>", handler)  # macOS one-button-mouse fallback
+
+
+# ---------------------------------------------------------------------------
+# Editable results table (Treeview) used by search dialogs & full history.
+# Right-click a row to Edit or Delete that borrow record.
+# ---------------------------------------------------------------------------
+
+class HistoryTable(ttk.Frame):
+    """records fetched via fetch_func(): (record_id, book, author, student,
+    class, borrowed, returned). record_id is None for placeholder
+    'no history yet' rows, which can't be edited/deleted."""
+
+    def __init__(self, parent, fetch_func):
+        super().__init__(parent)
+        self.fetch_func = fetch_func
+        self.tree = None
+        self.build()
+
+    def build(self):
+        for widget in self.winfo_children():
+            widget.destroy()
+
+        records = self.fetch_func()
+
+        columns = ("book", "author", "student", "class", "borrowed", "returned")
+        self.tree = ttk.Treeview(self, columns=columns, show="headings", height=12)
+
+        headings = {
+            "book": "Book", "author": "Author", "student": "Borrower",
+            "class": "Class", "borrowed": "Borrowed", "returned": "Returned",
+        }
+        widths = {
+            "book": 160, "author": 130, "student": 110,
+            "class": 70, "borrowed": 90, "returned": 90,
+        }
+        for col in columns:
+            self.tree.heading(col, text=headings[col])
+            self.tree.column(col, width=widths[col], anchor="w")
+
+        for idx, (record_id, book, author, student, sclass, bdate, rdate) in enumerate(records):
+            iid = f"r{record_id}" if record_id is not None else f"n{idx}"
+            self.tree.insert("", "end", iid=iid, values=(
+                book, author, student, sclass, bdate, rdate or "not returned"
+            ))
+
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        bind_right_click(self.tree, self.show_context_menu)
+
+    def show_context_menu(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid or not iid.startswith("r"):
+            return  # empty area, or a placeholder "no history" row
+        self.tree.selection_set(iid)
+        record_id = int(iid[1:])
+
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Edit...", command=lambda: self.edit_record(record_id))
+        menu.add_command(label="Delete", command=lambda: self.delete_record(record_id))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def edit_record(self, record_id):
+        EditRecordDialog(self, record_id, on_saved=self.build)
+
+    def delete_record(self, record_id):
+        record = get_borrow_record_by_id_db(record_id)
+        if not record:
+            return
+        _, _, book_name, _, student_name, *_ = record
+        if messagebox.askyesno(
+            "Confirm delete",
+            f'Delete the borrow record for "{book_name}" ({student_name})? '
+            "This cannot be undone."
+        ):
+            delete_borrow_record_db(record_id)
+            self.build()
+
+
+class EditRecordDialog(tk.Toplevel):
+    """Edit a borrow record's student name, class, borrow date, and return date."""
+
+    def __init__(self, parent, record_id, on_saved):
+        super().__init__(parent)
+        self.record_id = record_id
+        self.on_saved = on_saved
+        self.title("Edit Borrow Record")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        record = get_borrow_record_by_id_db(record_id)
+        if not record:
+            self.destroy()
+            return
+        (_, self.book_id, book_name, author,
+         student_name, student_class, borrow_date, return_date) = record
+
+        form = ttk.Frame(self, padding=15)
+        form.pack()
+
+        ttk.Label(form, text="Book:").grid(row=0, column=0, sticky="e", pady=4)
+        ttk.Label(form, text=f"{book_name} (by {author})").grid(
+            row=0, column=1, sticky="w", pady=4
+        )
+
+        ttk.Label(form, text="Student name:").grid(row=1, column=0, sticky="e", pady=4)
+        self.student_var = tk.StringVar(value=student_name)
+        ttk.Entry(form, textvariable=self.student_var, width=30).grid(row=1, column=1, pady=4)
+
+        ttk.Label(form, text="Student class:").grid(row=2, column=0, sticky="e", pady=4)
+        self.class_var = tk.StringVar(value=student_class)
+        ttk.Entry(form, textvariable=self.class_var, width=30).grid(row=2, column=1, pady=4)
+
+        ttk.Label(form, text="Borrow date:").grid(row=3, column=0, sticky="e", pady=4)
+        self.borrow_date_entry = DateEntry(form, initial=borrow_date)
+        self.borrow_date_entry.grid(row=3, column=1, sticky="w", pady=4)
+
+        self.returned_var = tk.BooleanVar(value=bool(return_date))
+        ttk.Checkbutton(
+            form, text="Returned", variable=self.returned_var,
+            command=self.toggle_return_date
+        ).grid(row=4, column=0, sticky="e", pady=4)
+        self.return_date_entry = DateEntry(form, initial=return_date)
+        self.return_date_entry.grid(row=4, column=1, sticky="w", pady=4)
+        self.toggle_return_date()
+
+        button_row = ttk.Frame(form)
+        button_row.grid(row=5, column=0, columnspan=2, pady=(10, 0))
+        ttk.Button(button_row, text="Save", command=self.save).pack(side="left", padx=4)
+        ttk.Button(button_row, text="Cancel", command=self.destroy).pack(side="left", padx=4)
+
+    def toggle_return_date(self):
+        if self.returned_var.get():
+            self.return_date_entry.entry.configure(state="readonly")
+            self.return_date_entry.btn.configure(state="normal")
+        else:
+            self.return_date_entry.entry.configure(state="disabled")
+            self.return_date_entry.btn.configure(state="disabled")
+
+    def save(self):
+        student_name = self.student_var.get().strip()
+        student_class = self.class_var.get().strip()
+        if not student_name or not student_class:
+            messagebox.showwarning("Missing info", "Student name and class cannot be empty.")
+            return
+
+        return_date = self.return_date_entry.get() if self.returned_var.get() else None
+
+        update_borrow_record_db(
+            self.record_id, student_name, student_class,
+            self.borrow_date_entry.get(), return_date
+        )
+        self.on_saved()
+        self.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Dialog windows, one per action
+# ---------------------------------------------------------------------------
+
+class AddBookDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Add a New Book")
+        self.resizable(False, False)
+        self.transient(parent)
+
+        form = ttk.Frame(self, padding=15)
+        form.pack()
+
+        ttk.Label(form, text="Book name:").grid(row=0, column=0, sticky="e", pady=4)
+        self.name_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.name_var, width=30).grid(row=0, column=1, pady=4)
+
+        ttk.Label(form, text="Author:").grid(row=1, column=0, sticky="e", pady=4)
+        self.author_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.author_var, width=30).grid(row=1, column=1, pady=4)
+
+        ttk.Button(form, text="Add Book", command=self.save).grid(
+            row=2, column=0, columnspan=2, pady=(10, 0)
+        )
+
+    def save(self):
+        name = self.name_var.get().strip()
+        author = self.author_var.get().strip()
+        if not name or not author:
+            messagebox.showwarning("Missing info", "Please enter both a book name and an author.")
+            return
+        add_book_db(name, author)
+        messagebox.showinfo("Success", f'"{name}" by {author} added to the library.')
+        self.name_var.set("")
+        self.author_var.set("")
+
+
+class BorrowBookDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Borrow a Book")
+        self.resizable(False, False)
+        self.transient(parent)
+
+        self.books = get_all_books_db()
+        self.all_book_labels = [f"{name} (by {author})" for _, name, author in self.books]
+        self.label_to_book = dict(zip(self.all_book_labels, self.books))
+
+        form = ttk.Frame(self, padding=15)
+        form.pack()
+
+        ttk.Label(form, text="Book:").grid(row=0, column=0, sticky="e", pady=4)
+        self.book_var = tk.StringVar()
+        self.book_combo = ttk.Combobox(form, textvariable=self.book_var,
+                                        values=self.all_book_labels, width=32)
+        self.book_combo.grid(row=0, column=1, pady=4)
+        self.book_combo.bind("<<ComboboxSelected>>", self.check_availability)
+        self.book_combo.bind("<KeyRelease>", self.filter_books)
+        self.book_combo.bind("<FocusOut>", self.check_availability)
+
+        book_labels = self.all_book_labels
+        ttk.Label(form, text="(type to filter, or click the dropdown arrow)",
+                  font=("TkDefaultFont", 8)).grid(row=1, column=1, sticky="w")
+
+        self.status_var = tk.StringVar()
+        self.status_label = ttk.Label(form, textvariable=self.status_var, foreground="red")
+        self.status_label.grid(row=2, column=0, columnspan=2, sticky="w")
+
+        ttk.Label(form, text="Student name:").grid(row=3, column=0, sticky="e", pady=4)
+        self.student_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.student_var, width=30).grid(row=3, column=1, pady=4)
+
+        ttk.Label(form, text="Student class:").grid(row=4, column=0, sticky="e", pady=4)
+        self.class_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.class_var, width=30).grid(row=4, column=1, pady=4)
+
+        ttk.Label(form, text="Borrow date:").grid(row=5, column=0, sticky="e", pady=4)
+        self.date_entry = DateEntry(form)
+        self.date_entry.grid(row=5, column=1, sticky="w", pady=4)
+
+        self.save_button = ttk.Button(form, text="Log Borrow", command=self.save)
+        self.save_button.grid(row=6, column=0, columnspan=2, pady=(10, 0))
+
+        if book_labels:
+            self.book_combo.current(0)
+            self.check_availability()
+        else:
+            messagebox.showinfo("No books", "There are no books in the library yet. Add one first.")
+
+    def filter_books(self, event=None):
+        """Narrow the dropdown list to labels containing the typed text."""
+        typed = self.book_var.get().strip().lower()
+        if typed:
+            filtered = [label for label in self.all_book_labels if typed in label.lower()]
+        else:
+            filtered = self.all_book_labels
+        self.book_combo["values"] = filtered
+
+    def get_selected_book(self):
+        return self.label_to_book.get(self.book_var.get())
+
+    def check_availability(self, event=None):
+        """Show 'not yet returned' if the selected book currently has an open loan."""
+        selection = self.get_selected_book()
+        if not selection:
+            self.status_var.set('Type or select an exact book from the list above.')
+            self.status_label.configure(foreground="red")
+            self.save_button.state(["disabled"])
+            return
+        book_id, book_name, _ = selection
+        open_records = get_open_records_for_book_db(book_id)
+
+        if open_records:
+            _, sname, sclass, bdate = open_records[0]
+            self.status_var.set(
+                f'Not yet returned - currently with {sname} ({sclass}), borrowed {bdate}.'
+            )
+            self.save_button.state(["disabled"])
+        else:
+            self.status_var.set("Available.")
+            self.status_label.configure(foreground="green")
+            self.save_button.state(["!disabled"])
+            return
+        self.status_label.configure(foreground="red")
+
+    def save(self):
+        if not self.books:
+            return
+        selection = self.get_selected_book()
+        if not selection:
+            messagebox.showwarning(
+                "No book selected",
+                "Please type or select an exact book name from the dropdown list."
+            )
+            return
+
+        book_id, book_name, _ = selection
+
+        # Guard against double-borrowing even if the status label was bypassed.
+        if get_open_records_for_book_db(book_id):
+            messagebox.showwarning("Not yet returned",
+                                    f'"{book_name}" is not yet returned and cannot be borrowed.')
+            self.check_availability()
+            return
+
+        student_name = self.student_var.get().strip()
+        student_class = self.class_var.get().strip()
+        if not student_name or not student_class:
+            messagebox.showwarning("Missing info", "Please enter the student's name and class.")
+            return
+
+        borrow_book_db(book_id, student_name, student_class, self.date_entry.get())
+        messagebox.showinfo(
+            "Success",
+            f'"{book_name}" borrowed by {student_name} ({student_class}) '
+            f'on {self.date_entry.get()}.'
+        )
+        self.student_var.set("")
+        self.class_var.set("")
+        self.check_availability()
+
+
+class ReturnBookDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Return a Book")
+        self.resizable(False, False)
+        self.transient(parent)
+
+        self.books = get_all_books_db()
+        self.all_book_labels = [f"{name} (by {author})" for _, name, author in self.books]
+        self.label_to_book = dict(zip(self.all_book_labels, self.books))
+
+        form = ttk.Frame(self, padding=15)
+        form.pack()
+
+        ttk.Label(form, text="Book:").grid(row=0, column=0, sticky="e", pady=4)
+        self.book_var = tk.StringVar()
+        self.book_combo = ttk.Combobox(form, textvariable=self.book_var,
+                                        values=self.all_book_labels, width=32)
+        self.book_combo.grid(row=0, column=1, pady=4)
+        self.book_combo.bind("<<ComboboxSelected>>", self.refresh_students)
+        self.book_combo.bind("<KeyRelease>", self.filter_books)
+        self.book_combo.bind("<FocusOut>", self.refresh_students)
+
+        ttk.Label(form, text="(type to filter, or click the dropdown arrow)",
+                  font=("TkDefaultFont", 8)).grid(row=1, column=1, sticky="w")
+
+        ttk.Label(form, text="Borrowed by:").grid(row=2, column=0, sticky="e", pady=4)
+        self.record_var = tk.StringVar()
+        self.record_combo = ttk.Combobox(form, textvariable=self.record_var,
+                                          width=32, state="readonly")
+        self.record_combo.grid(row=2, column=1, pady=4)
+
+        ttk.Label(form, text="Return date:").grid(row=3, column=0, sticky="e", pady=4)
+        self.date_entry = DateEntry(form)
+        self.date_entry.grid(row=3, column=1, sticky="w", pady=4)
+
+        ttk.Button(form, text="Log Return", command=self.save).grid(
+            row=4, column=0, columnspan=2, pady=(10, 0)
+        )
+
+        self.open_records = []
+        self.label_to_record = {}
+        if self.all_book_labels:
+            self.book_combo.current(0)
+            self.refresh_students()
+        else:
+            messagebox.showinfo("No books", "There are no books in the library yet.")
+
+    def filter_books(self, event=None):
+        """Narrow the dropdown list to labels containing the typed text."""
+        typed = self.book_var.get().strip().lower()
+        if typed:
+            filtered = [label for label in self.all_book_labels if typed in label.lower()]
+        else:
+            filtered = self.all_book_labels
+        self.book_combo["values"] = filtered
+
+    def refresh_students(self, event=None):
+        selection = self.label_to_book.get(self.book_var.get())
+        if not selection:
+            self.record_combo["values"] = []
+            self.record_var.set("")
+            self.open_records = []
+            self.label_to_record = {}
+            return
+
+        book_id = selection[0]
+        self.open_records = get_open_records_for_book_db(book_id)
+        labels = [f"{sname} ({sclass}) - borrowed {bdate}"
+                  for _, sname, sclass, bdate in self.open_records]
+        self.label_to_record = dict(zip(labels, self.open_records))
+        self.record_combo["values"] = labels
+        if labels:
+            self.record_combo.current(0)
+        else:
+            self.record_var.set("")
+
+    def save(self):
+        record = self.label_to_record.get(self.record_var.get())
+        if not record:
+            messagebox.showwarning("Nothing to return",
+                                    "This book has no outstanding (un-returned) loans.")
+            return
+        record_id, student_name, student_class, _ = record
+        return_book_db(record_id, self.date_entry.get())
+        messagebox.showinfo(
+            "Success",
+            f'Return logged for {student_name} ({student_class}) on {self.date_entry.get()}.'
+        )
+        self.refresh_students()
+
+
+class SearchByBookDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Search by Book Name")
+        self.geometry("620x400")
+        self.transient(parent)
+
+        top = ttk.Frame(self, padding=10)
+        top.pack(fill="x")
+        ttk.Label(top, text="Book name:").pack(side="left")
+        self.query_var = tk.StringVar()
+        entry = ttk.Entry(top, textvariable=self.query_var, width=30)
+        entry.pack(side="left", padx=6)
+        entry.bind("<Return>", lambda e: self.search())
+        ttk.Button(top, text="Search", command=self.search).pack(side="left")
+
+        ttk.Label(self, text="Right-click a result row to edit or delete that record.",
+                  font=("TkDefaultFont", 8)).pack(anchor="w", padx=10)
+
+        self.results_frame = ttk.Frame(self, padding=(10, 0, 10, 10))
+        self.results_frame.pack(fill="both", expand=True)
+
+        entry.focus()
+
+    def search(self):
+        for widget in self.results_frame.winfo_children():
+            widget.destroy()
+
+        self.current_query = self.query_var.get().strip()
+        matches = find_books_by_name_db(self.current_query)
+        if not matches:
+            ttk.Label(self.results_frame,
+                      text=f'No book found matching "{self.current_query}".').pack(pady=20)
+            return
+
+        table = HistoryTable(self.results_frame, fetch_func=self.fetch_records)
+        table.pack(fill="both", expand=True)
+
+    def fetch_records(self):
+        matches = find_books_by_name_db(self.current_query)
+        flattened = []
+        for book_id, name, author in matches:
+            history = get_history_for_book_db(book_id)
+            if not history:
+                flattened.append((None, name, author, "-", "-", "-", None))
+            for record_id, sname, sclass, bdate, rdate in history:
+                flattened.append((record_id, name, author, sname, sclass, bdate, rdate))
+        return flattened
+
+
+class SearchByStudentDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Search by Student Name")
+        self.geometry("620x400")
+        self.transient(parent)
+
+        top = ttk.Frame(self, padding=10)
+        top.pack(fill="x")
+        ttk.Label(top, text="Student name:").pack(side="left")
+        self.query_var = tk.StringVar()
+        entry = ttk.Entry(top, textvariable=self.query_var, width=30)
+        entry.pack(side="left", padx=6)
+        entry.bind("<Return>", lambda e: self.search())
+        ttk.Button(top, text="Search", command=self.search).pack(side="left")
+
+        ttk.Label(self, text="Right-click a result row to edit or delete that record.",
+                  font=("TkDefaultFont", 8)).pack(anchor="w", padx=10)
+
+        self.results_frame = ttk.Frame(self, padding=(10, 0, 10, 10))
+        self.results_frame.pack(fill="both", expand=True)
+
+        entry.focus()
+
+    def search(self):
+        for widget in self.results_frame.winfo_children():
+            widget.destroy()
+
+        self.current_query = self.query_var.get().strip()
+        records = search_by_student_db(self.current_query)
+        if not records:
+            ttk.Label(self.results_frame,
+                      text=f'No borrowing history found for "{self.current_query}".').pack(pady=20)
+            return
+
+        table = HistoryTable(self.results_frame, fetch_func=self.fetch_records)
+        table.pack(fill="both", expand=True)
+
+    def fetch_records(self):
+        return search_by_student_db(self.current_query)
+
+
+class EditBookDialog(tk.Toplevel):
+    """Edit a book's name and author."""
+
+    def __init__(self, parent, book_id, on_saved):
+        super().__init__(parent)
+        self.book_id = book_id
+        self.on_saved = on_saved
+        self.title("Edit Book")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        book = get_book_by_id_db(book_id)
+        if not book:
+            self.destroy()
+            return
+        _, name, author = book
+
+        form = ttk.Frame(self, padding=15)
+        form.pack()
+
+        ttk.Label(form, text="Book name:").grid(row=0, column=0, sticky="e", pady=4)
+        self.name_var = tk.StringVar(value=name)
+        ttk.Entry(form, textvariable=self.name_var, width=30).grid(row=0, column=1, pady=4)
+
+        ttk.Label(form, text="Author:").grid(row=1, column=0, sticky="e", pady=4)
+        self.author_var = tk.StringVar(value=author)
+        ttk.Entry(form, textvariable=self.author_var, width=30).grid(row=1, column=1, pady=4)
+
+        button_row = ttk.Frame(form)
+        button_row.grid(row=2, column=0, columnspan=2, pady=(10, 0))
+        ttk.Button(button_row, text="Save", command=self.save).pack(side="left", padx=4)
+        ttk.Button(button_row, text="Cancel", command=self.destroy).pack(side="left", padx=4)
+
+    def save(self):
+        name = self.name_var.get().strip()
+        author = self.author_var.get().strip()
+        if not name or not author:
+            messagebox.showwarning("Missing info", "Book name and author cannot be empty.")
+            return
+        update_book_db(self.book_id, name, author)
+        self.on_saved()
+        self.destroy()
+
+
+class ListAllBooksDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("All Books")
+        self.geometry("400x430")
+        self.transient(parent)
+
+        self.frame = ttk.Frame(self, padding=10)
+        self.frame.pack(fill="both", expand=True)
+
+        self.build_table()
+
+    def build_table(self):
+        for widget in self.frame.winfo_children():
+            widget.destroy()
+
+        books = get_all_books_db()
+        if not books:
+            ttk.Label(self.frame, text="No books in the library yet.").pack(pady=20)
+            return
+
+        ttk.Label(self.frame, text="Right-click a row to edit or delete a book.",
+                  font=("TkDefaultFont", 8)).pack(anchor="w")
+
+        table_area = ttk.Frame(self.frame)
+        table_area.pack(fill="both", expand=True, pady=(4, 0))
+
+        self.tree = ttk.Treeview(table_area, columns=("name", "author"),
+                                  show="headings", height=15)
+        self.tree.heading("name", text="Book Name")
+        self.tree.heading("author", text="Author")
+        self.tree.column("name", width=220)
+        self.tree.column("author", width=150)
+        for book_id, name, author in books:
+            self.tree.insert("", "end", iid=f"b{book_id}", values=(name, author))
+
+        scrollbar = ttk.Scrollbar(table_area, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        bind_right_click(self.tree, self.show_context_menu)
+
+    def show_context_menu(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self.tree.selection_set(iid)
+        book_id = int(iid[1:])
+
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Edit...", command=lambda: self.edit_book(book_id))
+        menu.add_command(label="Delete", command=lambda: self.delete_book(book_id))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def edit_book(self, book_id):
+        EditBookDialog(self, book_id, on_saved=self.build_table)
+
+    def delete_book(self, book_id):
+        count = get_borrow_count_for_book_db(book_id)
+        if count > 0:
+            messagebox.showwarning(
+                "Cannot delete",
+                f"This book has {count} borrow record(s) attached to it. "
+                "Delete those records first (via Search by Book or Full History), "
+                "then delete the book."
+            )
+            return
+        book = get_book_by_id_db(book_id)
+        book_name = book[1] if book else "this book"
+        if messagebox.askyesno("Confirm delete", f'Delete "{book_name}" permanently?'):
+            delete_book_db(book_id)
+            self.build_table()
+
+
+class FullHistoryDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Full Borrow / Return History")
+        self.geometry("700x420")
+        self.transient(parent)
+
+        frame = ttk.Frame(self, padding=10)
+        frame.pack(fill="both", expand=True)
+
+        records = get_full_history_db()
+        if not records:
+            ttk.Label(frame, text="No borrow/return history yet.").pack(pady=20)
+            return
+
+        ttk.Label(frame, text="Right-click a row to edit or delete that record.",
+                  font=("TkDefaultFont", 8)).pack(anchor="w")
+
+        table = HistoryTable(frame, fetch_func=get_full_history_db)
+        table.pack(fill="both", expand=True)
+
+
+# ---------------------------------------------------------------------------
+# Main window
+# ---------------------------------------------------------------------------
+
+class LibraryApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Library Management System")
+        self.resizable(False, False)
+
+        ttk.Label(
+            self, text="Library Management System",
+            font=("TkDefaultFont", 14, "bold")
+        ).pack(padx=20, pady=(20, 10))
+
+        buttons = ttk.Frame(self, padding=(20, 0, 20, 20))
+        buttons.pack()
+
+        actions = [
+            ("Add Book", lambda: AddBookDialog(self)),
+            ("Borrow Book", lambda: BorrowBookDialog(self)),
+            ("Return Book", lambda: ReturnBookDialog(self)),
+            ("Search by Book", lambda: SearchByBookDialog(self)),
+            ("Search by Student", lambda: SearchByStudentDialog(self)),
+            ("List All Books", lambda: ListAllBooksDialog(self)),
+            ("Full History", lambda: FullHistoryDialog(self)),
+            ("Exit", self.destroy),
+        ]
+
+        for i, (label, command) in enumerate(actions):
+            row, col = divmod(i, 2)
+            ttk.Button(buttons, text=label, width=20, command=command).grid(
+                row=row, column=col, padx=6, pady=6
+            )
+
+
+def main():
+    initialize_database()
+    app = LibraryApp()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
